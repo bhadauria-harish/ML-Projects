@@ -1,10 +1,8 @@
 import os
 import requests
+import json
 import google.generativeai as genai
 from dotenv import load_dotenv
-from langchain_community.llms import OpenAI
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
 
 # Load environment variables
 load_dotenv()
@@ -17,11 +15,25 @@ UPC_DB_API_KEY = os.getenv("UPC_DB_API_KEY")
 if not GEMINI_API_KEY or not UPC_DB_API_KEY:
     raise ValueError("API keys are missing in the environment variables.")
 
-# Set up Gemini flash 2.0 Model
+# Configure Gemini
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.0-flash")
 
-# Helper functions to fetch product information
+def parse_gemini_json(raw_text):
+    cleaned = raw_text.strip()
+    if cleaned.startswith("```json"):
+        cleaned = cleaned.replace("```json", "").strip()
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3].strip()
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        print("\u26a0\ufe0f Failed to parse Gemini output to JSON.")
+        return {"raw_text": raw_text}
+
+# Try OpenFoodFacts
+
 def get_from_openfoodfacts(barcode):
     url = f"https://world.openfoodfacts.org/api/v0/product/{barcode}.json"
     res = requests.get(url)
@@ -36,6 +48,8 @@ def get_from_openfoodfacts(barcode):
         }
     return None
 
+# Try UPC DB
+
 def get_from_upcdb(barcode):
     url = "https://api.upcitemdb.com/prod/trial/lookup"
     res = requests.get(url, params={"upc": barcode})
@@ -45,7 +59,7 @@ def get_from_upcdb(barcode):
         item = data["items"][0]
         return {
             "name": item.get("title", "Unknown"),
-            "nutritional_value": "Not available",
+            "nutritional_value": "Not available"
         }
     return None
 
@@ -56,10 +70,9 @@ def ask_gemini_about_barcode(barcode):
 
     prompt = f"""
     You are a product expert who knows about various consumer goods, including food and beverages. A user has scanned a barcode and is looking for detailed information about the product.
-
 The barcode is: {barcode}
 
-Please provide a detailed summary of the product with the following information:
+Please provide a detailed summary of the product in JSON format with the following keys:
 
 1. **Name** - What is the name of the product?
 2. **Brand** - What brand is it associated with?
@@ -71,10 +84,11 @@ Please provide a detailed summary of the product with the following information:
 8. **Alternative Suggestions** - Suggest any similar or alternative products that are healthier, more eco-friendly, or more affordable.
 
 Provide the information in a clear, concise, and structured manner. Make sure your response is accurate and based on product data commonly available.
+Respond strictly in JSON code block.
 """
 
     response = model.generate_content(prompt)
-    return response.text
+    return parse_gemini_json(response.text)
 
 # After getting the product data
 
@@ -82,14 +96,17 @@ def format_for_gemini(data):
     name = data.get("name", "Unknown")
     nutrients = data.get("nutritional_value", {})
 
-    nutrient_lines = "\n".join([f"- {k}: {v}" for k, v in nutrients.items()])
+    if isinstance(nutrients, dict):
+        nutrient_lines = "\n".join([f"- {k}: {v}" for k, v in nutrients.items()])
+    else:
+        nutrient_lines = nutrients
 
     prompt = f"""
     Name - {name}
     Nutritional Value -
     {nutrient_lines}
 
-    Please provide a detailed summary of the product with the above data:
+    Please provide a detailed summary of the product with the above data in JSON format:
 
 1. **Name** - What is the name of the product?
 2. **Brand** - What brand is it associated with?
@@ -101,12 +118,13 @@ def format_for_gemini(data):
 8. **Alternative Suggestions** - Suggest any similar or alternative products that are healthier, more eco-friendly, or more affordable.
 
 Provide the information in a clear, concise, and structured manner. Make sure your response is accurate and based on product data commonly available.
+Respond in JSON code block only.
 """
 
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel("gemini-2.0-flash")
     response = model.generate_content(prompt)
-    return response.text  # <-- This is important!
+    return parse_gemini_json(response.text)
 
 
 # Main function to fetch product data
